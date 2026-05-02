@@ -233,7 +233,6 @@ func BuildCoordinator(
 		})),
 		agentcore.WithReminderGenerator(reminder.Aggregate(store, reminder.Default()...)),
 		agentcore.WithStopGuard(reminder.NewStopGuard(store, nil)),
-		agentcore.WithStopAfterToolResult(stopAfterCommittedSubagent),
 	)
 	return agent, askUser, restore
 }
@@ -250,48 +249,6 @@ func decodeSaveFoundationResult(toolName string, result json.RawMessage) saveFou
 	var r saveFoundationResult
 	_ = json.Unmarshal(result, &r)
 	return r
-}
-
-type subagentToolResult struct {
-	TerminalResult json.RawMessage `json:"terminal_result"`
-	Results        []struct {
-		TerminalResult json.RawMessage `json:"terminal_result"`
-	} `json:"results"`
-}
-
-type commitChapterResult struct {
-	Committed bool `json:"committed"`
-}
-
-func stopAfterCommittedSubagent(toolName string, result json.RawMessage) bool {
-	if toolName != "subagent" {
-		return false
-	}
-
-	var r subagentToolResult
-	if err := json.Unmarshal(result, &r); err != nil {
-		return false
-	}
-	if isCommittedChapterResult(r.TerminalResult) {
-		return true
-	}
-	for _, item := range r.Results {
-		if isCommittedChapterResult(item.TerminalResult) {
-			return true
-		}
-	}
-	return false
-}
-
-func isCommittedChapterResult(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var r commitChapterResult
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return false
-	}
-	return r.Committed
 }
 
 // logContextWindowChoice 打印某个角色的窗口决策。source=default 时发 Warn 提示用户显式配置。
