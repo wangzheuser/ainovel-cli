@@ -406,15 +406,20 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, tickSpinner(), true
 	case toolSpinnerTickMsg:
 		m.toolSpinnerIdx = (m.toolSpinnerIdx + 1) % len(toolSpinnerFrames)
-		if m.snapshot.IsRunning {
-			// 事件流"进行中"行的 spinner 刷新（150ms，独立节奏）
+		// 事件流"进行中"行的 spinner 刷新（150ms，独立节奏）。
+		// spinner 帧只影响 running 事件行，已完成行的渲染输出 byte-for-byte 相同；
+		// 没有 running 事件时整个重渲是无意义的，跳过。
+		if m.snapshot.IsRunning && m.hasRunningEvent() {
 			m.refreshEventViewport()
 		}
 		return m, tickToolSpinner(), true
 	case cursorTickMsg:
 		m.cursorIdx++
 		if m.snapshot.IsRunning {
+			// cursor 闪烁需要全量重渲流式面板（光标位于 content 末尾）；
+			// 顺便把 dirty 一并清掉，flush tick 紧跟着不必重复刷。
 			m.refreshStreamViewport()
+			m.streamDirty = false
 		}
 		return m, tickCursor(), true
 	case streamDeltaMsg:
@@ -422,12 +427,15 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			m.streamRounds = append(m.streamRounds, "")
 		}
 		m.streamRounds[len(m.streamRounds)-1] += string(msg)
-		m.refreshStreamViewport()
-		if m.streamScroll {
-			m.streamVP.GotoBottom()
-		}
+		// 不立即 refreshStreamViewport，由 streamFlushTick 60fps 合并刷新。
+		// LLM 高速流式期每秒数十 token，逐个刷新等于每秒数十次全量重渲 32 段。
+		m.streamDirty = true
 		return m, listenStream(m.runtime), true
 	case streamClearMsg:
+		// round 边界：先把累积 delta 刷出去，新 round 才能视觉对齐
+		if m.flushStreamIfDirty() && m.streamScroll {
+			m.streamVP.GotoBottom()
+		}
 		if len(m.streamRounds) == 0 {
 			m.streamRounds = append(m.streamRounds, "")
 		} else if strings.TrimSpace(m.streamRounds[len(m.streamRounds)-1]) != "" {
@@ -440,6 +448,11 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			m.streamVP.GotoBottom()
 		}
 		return m, listenStream(m.runtime), true
+	case streamFlushTickMsg:
+		if m.flushStreamIfDirty() && m.streamScroll {
+			m.streamVP.GotoBottom()
+		}
+		return m, tickStreamFlush(), true
 	case quitResetMsg:
 		m.quitPending = false
 		return m, nil, true

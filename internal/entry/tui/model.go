@@ -73,6 +73,7 @@ type Model struct {
 	height         int
 	autoScroll     bool
 	streamScroll   bool // 流式面板自动跟随
+	streamDirty    bool // streamRounds 有未刷新的 delta；由 streamFlushTick 60fps 合并
 	focusPane      focusPane
 	hoverPane      focusPane
 	hoverActive    bool
@@ -140,6 +141,7 @@ func (m Model) Init() tea.Cmd {
 		tickSpinner(),
 		tickToolSpinner(),
 		tickCursor(),
+		tickStreamFlush(),
 	)
 }
 
@@ -183,6 +185,29 @@ func (m *Model) paneHighlighted(pane focusPane) bool {
 		return true
 	}
 	return m.hoverActive && m.hoverPane == pane
+}
+
+// hasRunningEvent 是否存在未完成（spinner 仍在转）的调用类事件。
+// toolSpinnerTick 用此判断是否值得重渲：没有 running 事件时 spinner 帧不影响输出，
+// 整个 refreshEventViewport 是确定的无效工作。
+func (m *Model) hasRunningEvent() bool {
+	for i := range m.events {
+		if m.events[i].Running() {
+			return true
+		}
+	}
+	return false
+}
+
+// flushStreamIfDirty 将累积的 streamRounds 渲染到 viewport；mark 为已刷。
+// 返回是否真正刷了，便于调用方决定要不要 GotoBottom。
+func (m *Model) flushStreamIfDirty() bool {
+	if !m.streamDirty {
+		return false
+	}
+	m.refreshStreamViewport()
+	m.streamDirty = false
+	return true
 }
 
 // refreshEventViewport 重新渲染事件流内容并设置 viewport。
