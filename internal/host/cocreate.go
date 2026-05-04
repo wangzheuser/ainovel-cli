@@ -217,32 +217,54 @@ func splitCoCreateMarkers(s string) (reply, draft string, ready bool, suggestion
 }
 
 // extractTagContent 从 s 中抠出 <tag>...</tag> 之间的文本。
-// 缺失闭标签（流式中段 / 模型漏写）时取到下一个已知开标签之前；都没有就到字符串末尾。
+// 三种偶发故障场景兜底，避免直接走降级丢字段：
+//   1. 有开无闭（流式中段）→ 切到下一个已知开标签前
+//   2. 无开有闭（模型 typo，如 <suggestions> 写成 <uggestions>）→ 从最近一个已知
+//      完整闭合标签的结束位置开始，到 </tag> 之前
+//   3. reply 完全无开标签（模型直接以自然语言开篇，末尾贴 </reply>）→ 从开头到 </reply>
 func extractTagContent(s, tag string) string {
 	open := "<" + tag + ">"
 	closeTag := "</" + tag + ">"
 	oIdx := strings.Index(s, open)
-	if oIdx < 0 {
-		return ""
-	}
-	rest := s[oIdx+len(open):]
-	if cIdx := strings.Index(rest, closeTag); cIdx >= 0 {
-		return strings.TrimSpace(rest[:cIdx])
-	}
-	// 没找到闭标签 → 切到下一个已知开标签前
-	for _, other := range []string{"<reply>", "<draft>", "<ready>", "<suggestions>"} {
-		if other == open {
-			continue
+	if oIdx >= 0 {
+		rest := s[oIdx+len(open):]
+		if cIdx := strings.Index(rest, closeTag); cIdx >= 0 {
+			return strings.TrimSpace(rest[:cIdx])
 		}
-		if idx := strings.Index(rest, other); idx >= 0 {
-			rest = rest[:idx]
+		// 有开无闭 → 切到下一个已知开标签前
+		for _, other := range []string{"<reply>", "<draft>", "<ready>", "<suggestions>"} {
+			if other == open {
+				continue
+			}
+			if idx := strings.Index(rest, other); idx >= 0 {
+				rest = rest[:idx]
+			}
 		}
+		return strings.TrimSpace(rest)
 	}
-	return strings.TrimSpace(rest)
+
+	// 无开有闭 → 从最近一个已知完整闭合标签的结束位置开始，到 </tag>。
+	if cIdx := strings.Index(s, closeTag); cIdx >= 0 {
+		prefix := s[:cIdx]
+		start := 0
+		for _, t := range []string{"</reply>", "</draft>", "</ready>", "</suggestions>"} {
+			if t == closeTag {
+				continue
+			}
+			if i := strings.LastIndex(prefix, t); i >= 0 {
+				if end := i + len(t); end > start {
+					start = end
+				}
+			}
+		}
+		return strings.TrimSpace(prefix[start:])
+	}
+	return ""
 }
 
-// parseSuggestions 把 [SUGGESTIONS] 段每行抠出来，去掉 "- " / "* " / "1. " 等列表前缀。
-// 最多保留 3 条；空行和过短（<2 字）的行忽略。
+// parseSuggestions 把 <suggestions> 段每行抠出来，去掉 "- " / "* " / "1. " 等列表前缀。
+// 最多保留 3 条；空行、过短（<2 字）、整行像 XML 标签的（typo 开标签兜底残留，
+// 例如 <uggestions>）忽略。
 func parseSuggestions(text string) []string {
 	if text == "" {
 		return nil
@@ -251,6 +273,10 @@ func parseSuggestions(text string) []string {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		// 整行像 XML 标签 → 跳过（防 typo 开标签污染）
+		if strings.HasPrefix(line, "<") && strings.HasSuffix(line, ">") {
 			continue
 		}
 		// 剥列表前缀
@@ -295,20 +321,21 @@ func stripOrderedPrefix(line string) string {
 
 // extractReplyPreview 流式预览：raw 还在生长时给 UI 一段可显示的文本。
 // 找到 <reply> 之后的内容，切到 </reply> 或下一个开标签 <draft> 之前。
-// 标签还没出现时整段返回（标签到达后会被自然切掉）。
+// 模型半遵守（漏 <reply> 开标签）时，开头到 </reply> 或 <draft> 都算 reply。
 func extractReplyPreview(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	open := "<" + tagReply + ">"
-	rIdx := strings.Index(trimmed, open)
-	if rIdx < 0 {
-		return trimmed
-	}
-	rest := trimmed[rIdx+len(open):]
 	closeTag := "</" + tagReply + ">"
+	draftOpen := "<" + tagDraft + ">"
+
+	rest := trimmed
+	if rIdx := strings.Index(trimmed, open); rIdx >= 0 {
+		rest = trimmed[rIdx+len(open):]
+	}
 	if cIdx := strings.Index(rest, closeTag); cIdx >= 0 {
 		return strings.TrimSpace(rest[:cIdx])
 	}
-	if dIdx := strings.Index(rest, "<"+tagDraft+">"); dIdx >= 0 {
+	if dIdx := strings.Index(rest, draftOpen); dIdx >= 0 {
 		rest = rest[:dIdx]
 	}
 	return strings.TrimSpace(rest)

@@ -315,8 +315,19 @@ func (m Model) handleVerticalScrollKey(msg tea.KeyMsg, upward bool) (tea.Model, 
 
 func (m Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.cocreate != nil {
+		// 鼠标按 X 坐标分流：屏幕左半 = conv 面板，右半 = prompt 面板。
+		// modal 居中且 conv 占左 ~58%，用屏幕中线判别足够准确。
+		// 用户在 conv 区滚轮自动停止 follow（让其能稳定停在某个历史位置）。
 		var cmd tea.Cmd
-		m.cocreate.promptVP, cmd = m.cocreate.promptVP.Update(msg)
+		if msg.X < m.width/2 {
+			m.cocreate.convFollow = false
+			m.cocreate.convVP, cmd = m.cocreate.convVP.Update(msg)
+			if m.cocreate.convVP.AtBottom() {
+				m.cocreate.convFollow = true
+			}
+		} else {
+			m.cocreate.promptVP, cmd = m.cocreate.promptVP.Update(msg)
+		}
 		return m, cmd
 	}
 	if m.modelSwitch != nil || m.askState != nil {

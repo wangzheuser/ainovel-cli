@@ -66,23 +66,30 @@ func errorText(err error) string {
 }
 
 type cocreateState struct {
-	session  *startup.CoCreateSession
-	awaiting bool
-	reqID    int
-	cancel   context.CancelFunc // 取消当前 LLM 请求
-	deltaCh  chan cocreateStreamItem
-	doneCh   chan cocreateDoneMsg
-	promptVP viewport.Model
+	session    *startup.CoCreateSession
+	awaiting   bool
+	reqID      int
+	cancel     context.CancelFunc // 取消当前 LLM 请求
+	deltaCh    chan cocreateStreamItem
+	doneCh     chan cocreateDoneMsg
+	convVP     viewport.Model
+	promptVP   viewport.Model
+	convFollow bool // true: 流式新内容自动滚到底；用户上滚后置 false 停止跟随
 }
 
 func newCoCreateState(initial string) *cocreateState {
-	vp := viewport.New(0, 0)
-	vp.MouseWheelEnabled = true
-	vp.MouseWheelDelta = 3
+	makeVP := func() viewport.Model {
+		vp := viewport.New(0, 0)
+		vp.MouseWheelEnabled = true
+		vp.MouseWheelDelta = 3
+		return vp
+	}
 	return &cocreateState{
-		session:  startup.NewCoCreateSession(strings.TrimSpace(initial)),
-		awaiting: true,
-		promptVP: vp,
+		session:    startup.NewCoCreateSession(strings.TrimSpace(initial)),
+		awaiting:   true,
+		convVP:     makeVP(),
+		promptVP:   makeVP(),
+		convFollow: true,
 	}
 }
 
@@ -221,22 +228,26 @@ func renderCoCreateBody(width, height int, state *cocreateState, errMsg, inputVi
 
 // extractReplyForDisplay 从 assistant 历史内容中切出 <reply>...</reply> 段。
 // 其他标签（<draft>/<ready>/<suggestions>）是给下一轮模型看的协议字段，不应裸暴露给用户。
-// 不含 <reply> 标签时（模型未遵守协议的降级路径）原样返回。
+// 模型半遵守（漏 <reply> 开标签）时，开头到 </reply> 或下一个开标签都算 reply。
+// 完全不含任何标签时（降级路径）原样返回。
 func extractReplyForDisplay(content string) string {
-	rIdx := strings.Index(content, "<reply>")
-	if rIdx < 0 {
-		return content
+	rest := content
+	if rIdx := strings.Index(content, "<reply>"); rIdx >= 0 {
+		rest = content[rIdx+len("<reply>"):]
 	}
-	rest := content[rIdx+len("<reply>"):]
 	if cIdx := strings.Index(rest, "</reply>"); cIdx >= 0 {
 		return strings.TrimSpace(rest[:cIdx])
 	}
+	cut := len(rest)
 	for _, mark := range []string{"<draft>", "<ready>", "<suggestions>"} {
-		if idx := strings.Index(rest, mark); idx >= 0 {
-			rest = rest[:idx]
+		if idx := strings.Index(rest, mark); idx >= 0 && idx < cut {
+			cut = idx
 		}
 	}
-	return strings.TrimSpace(rest)
+	if cut == len(rest) && !strings.Contains(content, "<") {
+		return content
+	}
+	return strings.TrimSpace(rest[:cut])
 }
 
 // renderCoCreateSuggestions 在 input 上方渲染 AI 建议行。awaiting 时或没有建议时
@@ -351,11 +362,11 @@ func coCreateHint(state *cocreateState) string {
 	case state == nil:
 		return "Enter 发送 · Esc 退出"
 	case state.awaiting:
-		return "AI 回复中 · ↑↓ 滚动右侧 · Esc 退出"
+		return "AI 回复中 · ↑↓ 滚对话 · 滚轮滚指令 · Esc 退出"
 	case state.canStart():
-		return "Enter 继续补充 · Ctrl+S 开始创作 · ↑↓ 滚动 · Esc 退出"
+		return "Enter 继续补充 · Ctrl+S 开始创作 · ↑↓ 滚对话 · 滚轮滚指令 · Esc 退出"
 	default:
-		return "Enter 发送 · ↑↓ 滚动 · Esc 退出"
+		return "Enter 发送 · ↑↓ 滚对话 · 滚轮滚指令 · Esc 退出"
 	}
 }
 
@@ -421,17 +432,27 @@ func renderCoCreateConversationPanel(width, height int, state *cocreateState, er
 		lines = append(lines, lipgloss.NewStyle().Foreground(colorError).Render("! "+errMsg))
 	}
 
-	contentH := max(4, height-2)
-	if len(lines) > contentH {
-		lines = lines[len(lines)-contentH:]
+	// 用 viewport 替代手动 truncate，让用户可以滚动回看。
+	// vp 高度 = panel 高度 - 1 行标题。SetContent 后若用户原本在底部，
+	// 自动滚到最新（流式跟随）；用户上滚后 convFollow 关掉就停止跟随。
+	vpH := height - 1
+	if vpH < 1 {
+		vpH = 1
 	}
-	content := strings.Join(lines, "\n")
+	if state.convVP.Width != contentW || state.convVP.Height != vpH {
+		state.convVP.Width = contentW
+		state.convVP.Height = vpH
+	}
+	state.convVP.SetContent(strings.Join(lines, "\n"))
+	if state.convFollow {
+		state.convVP.GotoBottom()
+	}
 
 	style := lipgloss.NewStyle().
 		Width(contentW).
 		Height(height).
 		Padding(0, 1)
-	return style.Render(panelTitleStyle.Render(":: 共创对话") + "\n" + content)
+	return style.Render(panelTitleStyle.Render(":: 共创对话") + "\n" + state.convVP.View())
 }
 
 func renderCoCreatePromptPanel(width, height int, state *cocreateState) string {

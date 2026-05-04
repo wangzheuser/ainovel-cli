@@ -620,17 +620,29 @@ func (m Model) handleCoCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	state := m.cocreate
 
-	// 右侧指令面板滚动
+	// 键盘 ↑↓/PgUp/PgDn/Home/End 滚左侧对话面板（用户回看主体）；右侧创作指令
+	// 面板用鼠标滚轮滚（鼠标 handler 按 X 坐标自动分流）。上滚关 follow，
+	// 滚到底重新打开 follow（流式跟随）。
 	switch msg.Type {
-	case tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
+	case tea.KeyUp, tea.KeyPgUp:
+		state.convFollow = false
 		var cmd tea.Cmd
-		state.promptVP, cmd = state.promptVP.Update(msg)
+		state.convVP, cmd = state.convVP.Update(msg)
+		return m, cmd
+	case tea.KeyDown, tea.KeyPgDown:
+		var cmd tea.Cmd
+		state.convVP, cmd = state.convVP.Update(msg)
+		if state.convVP.AtBottom() {
+			state.convFollow = true
+		}
 		return m, cmd
 	case tea.KeyHome:
-		state.promptVP.GotoTop()
+		state.convFollow = false
+		state.convVP.GotoTop()
 		return m, nil
 	case tea.KeyEnd:
-		state.promptVP.GotoBottom()
+		state.convFollow = true
+		state.convVP.GotoBottom()
 		return m, nil
 	case tea.KeyEsc:
 		return m.exitCoCreate()
