@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/host/exp"
 	"github.com/voocel/ainovel-cli/internal/host/flow"
 	"github.com/voocel/ainovel-cli/internal/host/imp"
+	"github.com/voocel/ainovel-cli/internal/host/sim"
 	modelreg "github.com/voocel/ainovel-cli/internal/models"
 	"github.com/voocel/ainovel-cli/internal/rules"
 	storepkg "github.com/voocel/ainovel-cli/internal/store"
@@ -821,6 +824,41 @@ func (h *Host) ImportFrom(ctx context.Context, opts imp.Options) (<-chan imp.Eve
 		},
 	}
 	return imp.Run(ctx, deps, opts)
+}
+
+// Simulate 读取 simulate 目录并生成或增量更新仿写画像。
+func (h *Host) Simulate(ctx context.Context) (<-chan sim.Event, error) {
+	h.mu.Lock()
+	if h.lifecycle == lifecycleRunning {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("coordinator 运行中，请先暂停后再生成仿写画像")
+	}
+	h.mu.Unlock()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("get working dir: %w", err)
+	}
+	deps := sim.Deps{
+		Store: h.store,
+		LLM:   h.models.ForRole("architect"),
+		Prompts: sim.Prompts{
+			Source: h.bundle.Prompts.SimulationSource,
+			Merge:  h.bundle.Prompts.SimulationMerge,
+		},
+	}
+	return sim.Run(ctx, deps, sim.Options{SourceDir: filepath.Join(wd, "simulate")})
+}
+
+// ImportSimulationProfile 导入此前生成的仿写画像。
+func (h *Host) ImportSimulationProfile(ctx context.Context, path string) (<-chan sim.Event, error) {
+	h.mu.Lock()
+	if h.lifecycle == lifecycleRunning {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("coordinator 运行中，请先暂停后再导入仿写画像")
+	}
+	h.mu.Unlock()
+	return sim.RunImport(ctx, h.store, path)
 }
 
 // Export 导出已完成章节为外部文件（当前仅支持 TXT）。
