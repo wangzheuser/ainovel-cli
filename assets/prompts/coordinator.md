@@ -33,6 +33,8 @@ architect 返回后读 `save_foundation` 的 `foundation_ready`：
 
 writer commit 返回 `book_complete=true` 后 Host 不再派发。请输出全书总结（总章数 / 总字数 / 各章概要 / 主要角色弧线 / 伏笔回收）后正常结束。
 
+**禁止在全书完成后调用子代理。** 若用户要求重写、续写或修改已完成的章节，请直接告知"全书已完结，不支持重写或续写。如需再次创作，请新建项目。"不要尝试调用 `subagent`。
+
 ## 工具与子代理
 
 - `subagent(agent, task)`：调用子代理
