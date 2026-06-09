@@ -21,9 +21,11 @@ import (
 const (
 	logTailCap   = 200 << 10 // 日志只取尾部 200KB（循环是近端现象）
 	sessionTail  = 80        // 骨架尾巴条数（看派发先后顺序）
-	recentAgents = 2         // 额外扫描最近活跃的子代理会话数
-	repeatMin    = 3         // 重复达到几次才算"循环信号"
-	repeatTopN   = 12        // 重复签名最多列几条
+	repeatWindow = 150       // 重复聚合只看近端这么多条事件——长跑里正常工具累计上百次，
+	// 真循环是近端高度集中；用窗口而非累计，避免把"正常推进"误判成"死循环"。
+	recentAgents = 2  // 额外扫描最近活跃的子代理会话数
+	repeatMin    = 3  // 重复达到几次才算"高频信号"
+	repeatTopN   = 12 // 重复签名最多列几条
 )
 
 // RuntimeCapture 是一次运行时抓取的脱敏结果。只承载运行时信号；
@@ -115,7 +117,10 @@ func captureSessions(dir string, rc *RuntimeCapture) {
 	models := map[string]RoleModel{}
 
 	for _, f := range files {
-		evs := scanSession(filepath.Join(sessDir, f.path), f.agent, rc, repeats, dups, models)
+		evs := scanSession(filepath.Join(sessDir, f.path), f.agent, rc, models)
+		// 聚合只看近端窗口：长跑里 subagent/novel_context 累计上百次是正常推进，
+		// 不是循环；真死循环是近端高度集中。
+		aggregateRepeats(f.agent, tailEvents(evs, repeatWindow), repeats, dups)
 		// 骨架尾巴优先取 coordinator——派发循环在这看得最清。
 		if f.agent == "coordinator" && len(evs) > 0 {
 			rc.Tail = tailEvents(evs, sessionTail)
@@ -178,8 +183,9 @@ func sessionFiles(sessDir string) []sessionFile {
 	return out
 }
 
-// scanSession 读一个会话文件，逐行脱敏，累计重复/同段/模型，并返回事件序列。
-func scanSession(path, agent string, rc *RuntimeCapture, repeats, dups map[string]int, models map[string]RoleModel) []SkelEvent {
+// scanSession 读一个会话文件，逐行脱敏，收集事件序列与 per-agent 模型。
+// 重复/同段聚合不在这里做——交给 aggregateRepeats 在近端窗口上算。
+func scanSession(path, agent string, rc *RuntimeCapture, models map[string]RoleModel) []SkelEvent {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -197,7 +203,16 @@ func scanSession(path, agent string, rc *RuntimeCapture, repeats, dups map[strin
 		ev := redactMessage(agent, sl.Message)
 		evs = append(evs, ev)
 		rc.RedactedTexts += ev.Redacted
+		if sl.Meta != nil && (sl.Meta.Provider != "" || sl.Meta.Model != "") {
+			models[agent] = RoleModel{Agent: agent, Provider: sl.Meta.Provider, Model: sl.Meta.Model}
+		}
+	}
+	return evs
+}
 
+// aggregateRepeats 在给定事件窗口上累计重复签名与同段文本。
+func aggregateRepeats(agent string, evs []SkelEvent, repeats, dups map[string]int) {
+	for _, ev := range evs {
 		for _, t := range ev.Tools {
 			sig := agent + " · " + t.Name
 			if t.Invalid {
@@ -211,11 +226,7 @@ func scanSession(path, agent string, rc *RuntimeCapture, repeats, dups map[strin
 		if ev.TextSha != "" {
 			dups[ev.TextSha]++
 		}
-		if sl.Meta != nil && (sl.Meta.Provider != "" || sl.Meta.Model != "") {
-			models[agent] = RoleModel{Agent: agent, Provider: sl.Meta.Provider, Model: sl.Meta.Model}
-		}
 	}
-	return evs
 }
 
 // scanSessionTailOnly 仅取骨架（不计聚合），用于 coordinator 缺失时的兜底尾巴。

@@ -57,12 +57,14 @@ func RenderExport(rep Report, rc RuntimeCapture) []byte {
 		fmt.Fprintf(&b, "- %s → `%s` / `%s`\n", m.Agent, orDash(m.Provider), orDash(m.Model))
 	}
 
-	// 2. 诊断发现（创作 + 运行时检测，severity 优先）
-	b.WriteString("\n## 2. 诊断发现\n\n")
-	if len(rep.Findings) == 0 {
-		b.WriteString("未发现问题。\n")
+	// 2. 诊断发现（仅运行时；创作类诊断含剧情/伏笔，留在 /diag 屏上报告，不进可分享导出）
+	b.WriteString("\n## 2. 诊断发现（运行时）\n\n")
+	rf := runtimeFindings(&rc)
+	sortFindings(rf)
+	if len(rf) == 0 {
+		b.WriteString("未发现运行时异常。\n")
 	} else {
-		for _, f := range rep.Findings {
+		for _, f := range rf {
 			fmt.Fprintf(&b, "- [%s] %s\n", f.Severity, f.Title)
 			if f.Evidence != "" {
 				fmt.Fprintf(&b, "  - 证据：%s\n", f.Evidence)
@@ -85,7 +87,7 @@ func RenderExport(rep Report, rc RuntimeCapture) []byte {
 		wrote = true
 	}
 	if len(rc.Repeats) > 0 {
-		b.WriteString("- 重复签名（≥3 次，循环嫌疑）：\n")
+		b.WriteString("- 高频签名（近端窗口 ≥3 次，含正常重复工具，仅供参考）：\n")
 		for _, r := range rc.Repeats {
 			fmt.Fprintf(&b, "  - `%s` ×%d\n", r.Sig, r.Count)
 		}

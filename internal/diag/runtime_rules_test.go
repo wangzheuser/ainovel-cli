@@ -8,13 +8,13 @@ func TestRuntimeFindings_Classify(t *testing.T) {
 	rc := RuntimeCapture{
 		Repeats: []RepeatStat{
 			{Sig: "coordinator · err: InputValidationError", Count: 14}, // 错误循环 critical
-			{Sig: "coordinator · commit_chapter", Count: 5},             // 工具空转 warning
+			{Sig: "coordinator · subagent", Count: 45},                  // 正常高频工具 → 不产 Finding
 			{Sig: "writer · save_plan (args invalid)", Count: 4},        // 参数无效 warning
 		},
 		StuckStep:  "writing.commit_ch07",
 		StuckCount: 9, // 卡住 critical
 		LogKinds:   map[string]int{"stream_idle": 4},
-		LogErrors:  12,
+		LogErrors:  270, // 长跑累计，不应单独产 Finding
 	}
 
 	fs := runtimeFindings(&rc)
@@ -28,16 +28,21 @@ func TestRuntimeFindings_Classify(t *testing.T) {
 
 	want := map[string]Severity{
 		"RepeatedToolError": SevCritical,
-		"RepeatedToolCall":  SevWarning,
 		"ArgsInvalidLoop":   SevWarning,
 		"StuckStep":         SevCritical,
 		"StreamIdleStorm":   SevWarning,
-		"LogErrorBurst":     SevWarning,
 	}
 	for rule, w := range want {
 		if sev[rule] != w {
 			t.Errorf("%s: got %q want %q", rule, sev[rule], w)
 		}
+	}
+	// 正常高频工具 / 日志累计 error 不应产 Finding（避免长跑误报）。
+	if _, ok := sev["RepeatedToolCall"]; ok {
+		t.Error("普通工具重复不应产 Finding")
+	}
+	if _, ok := sev["LogErrorBurst"]; ok {
+		t.Error("日志 error 累计不应单独产 Finding")
 	}
 }
 

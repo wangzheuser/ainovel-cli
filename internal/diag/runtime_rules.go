@@ -9,9 +9,8 @@ import (
 
 // 运行时检测阈值。
 const (
-	repeatCritical = 8  // 重复达到此次数升为 critical
-	streamIdleWarn = 3  // stream_idle 累计告警阈值
-	logErrorWarn   = 10 // 日志 error 高发阈值
+	repeatCritical = 8 // 近端重复达到此次数升为 critical
+	streamIdleWarn = 3 // stream_idle 累计告警阈值
 )
 
 // RuntimeRuleFunc 是运行时诊断规则的统一签名（对应创作侧的 RuleFunc）。
@@ -20,10 +19,9 @@ const (
 type RuntimeRuleFunc func(rc *RuntimeCapture) []Finding
 
 var runtimeRules = []RuntimeRuleFunc{
-	repeatSignals,
+	repeatedErrors,
 	stuckStep,
 	streamIdleStorm,
-	logErrorBurst,
 }
 
 // runtimeFindings 跑全部运行时规则。
@@ -46,28 +44,28 @@ func Diagnose(s *store.Store) (Report, RuntimeCapture) {
 	return rep, rc
 }
 
-// repeatSignals 把重复签名分类成 Finding：错误循环 / 参数无效循环 / 工具空转。
-func repeatSignals(rc *RuntimeCapture) []Finding {
-	out := make([]Finding, 0, len(rc.Repeats))
+// repeatedErrors 只把"近端反复出现的错误 / 参数无效"判成 Finding。
+// 不碰普通工具重复——subagent/novel_context/read_chapter 等在长跑里天然
+// 高频，累计次数不是循环信号；真正的"反复而不推进"由 stuckStep 兜住。
+func repeatedErrors(rc *RuntimeCapture) []Finding {
+	var out []Finding
 	for _, r := range rc.Repeats {
-		sev := SevWarning
-		if r.Count >= repeatCritical {
-			sev = SevCritical
-		}
 		var rule, title, sugg string
 		switch {
 		case strings.Contains(r.Sig, " · err: "):
 			rule = "RepeatedToolError"
-			title = "工具错误循环（疑似死循环）"
-			sugg = "同一工具反复返回同一错误，多为模型参数不合规或工具契约不符；查 agentcore 工具校验 / prompt 参数约定（参见 #34）。"
+			title = "工具反复报同一错误"
+			sugg = "近端同一工具反复返回同一错误，多为模型参数不合规或工具契约不符；查 agentcore 工具校验 / prompt 参数约定（参见 #34）。"
 		case strings.Contains(r.Sig, "(args invalid)"):
 			rule = "ArgsInvalidLoop"
-			title = "参数无法解析并反复重试"
+			title = "参数反复无法解析"
 			sugg = "模型发来的参数无法解析却不断重试；看 agentcore 是否对该类型做了宽松强转（参见 #34）。"
 		default:
-			rule = "RepeatedToolCall"
-			title = "工具空转（疑似派发 livelock）"
-			sugg = "同一调用重复多次而未推进；查 flow.Router / Coordinator 是否反复派同一任务（参见 #17 / #31）。"
+			continue // 普通工具重复不产 Finding
+		}
+		sev := SevWarning
+		if r.Count >= repeatCritical {
+			sev = SevCritical
 		}
 		out = append(out, Finding{
 			Rule:       rule,
@@ -122,23 +120,5 @@ func streamIdleStorm(rc *RuntimeCapture) []Finding {
 		Title:      "流式中断频发（stream_idle）",
 		Evidence:   fmt.Sprintf("stream_idle ×%d", n),
 		Suggestion: "上游长时间不吐 token 被 watchdog 误杀；慢思考模型调大 streamIdleTimeout，或排查 provider 连接稳定性（参见 #32）。",
-	}}
-}
-
-// logErrorBurst 检测日志 error 高发。
-func logErrorBurst(rc *RuntimeCapture) []Finding {
-	if rc.LogErrors < logErrorWarn {
-		return nil
-	}
-	return []Finding{{
-		Rule:       "LogErrorBurst",
-		Category:   CatFlow,
-		Severity:   SevWarning,
-		Confidence: ConfHigh,
-		AutoLevel:  AutoNone,
-		Target:     "runtime",
-		Title:      "日志 error 高发",
-		Evidence:   fmt.Sprintf("error ×%d · warn ×%d", rc.LogErrors, rc.LogWarns),
-		Suggestion: "短时间内大量 error；结合错误分类（kind）与重复签名定位根因。",
 	}}
 }
