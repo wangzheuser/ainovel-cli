@@ -16,13 +16,16 @@ import (
 
 // renderTopBar 渲染顶部状态栏。
 // 左侧：provider/model，中间：书名，右侧：状态胶囊。
-func renderTopBar(snap host.UISnapshot, width int, spinnerFrame string) string {
+func renderTopBar(snap host.UISnapshot, width int, spinnerFrame, version string) string {
 	novelName := snap.NovelName
 	if novelName == "" {
 		novelName = "未定书名"
 	}
 
 	var infoParts []string
+	if version != "" {
+		infoParts = append(infoParts, "ainovel-cli "+version)
+	}
 	if snap.Provider != "" {
 		infoParts = append(infoParts, snap.Provider)
 	}

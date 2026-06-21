@@ -197,8 +197,15 @@ ToolResultMicrocompact → LightTrim → StoreSummaryCompact → FullSummary
 # 一键安装（macOS / Linux，无需 Go）
 curl -fsSL https://raw.githubusercontent.com/voocel/ainovel-cli/main/scripts/install.sh | sh
 
+# 安装指定版本
+curl -fsSL https://raw.githubusercontent.com/voocel/ainovel-cli/main/scripts/install.sh | sh -s -- v1.2.3
+
 # 或通过 Go 安装
 go install github.com/voocel/ainovel-cli/cmd/ainovel-cli@latest
+
+# 查看版本 / 更新到最新版本
+ainovel-cli --version
+ainovel-cli update
 
 # 首次运行，自动进入引导流程（选择 Provider → 输入 API Key → Base URL → 模型名）
 ainovel-cli

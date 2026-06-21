@@ -59,6 +59,7 @@ type Model struct {
 	help           *helpState
 	modelSwitch    *modelSwitchState
 	report         *reportState
+	version        string
 	importer       *importState
 	importSeq      int
 	simulator      *simulationState
@@ -103,7 +104,7 @@ type Model struct {
 }
 
 // NewModel 创建 TUI Model。
-func NewModel(rt *host.Host, bridge *askUserBridge) Model {
+func NewModel(rt *host.Host, bridge *askUserBridge, version string) Model {
 	ta := textarea.New()
 	ta.Placeholder = placeholderForNewMode(startupModeQuick)
 	ta.CharLimit = 2000
@@ -133,6 +134,7 @@ func NewModel(rt *host.Host, bridge *askUserBridge) Model {
 	return Model{
 		runtime:      rt,
 		askBridge:    bridge,
+		version:      strings.TrimSpace(version),
 		autoScroll:   true,
 		streamScroll: true,
 		mode:         modeNew,
@@ -555,7 +557,7 @@ func (m *Model) layoutHeights() (topH, inputH, bodyH int) {
 	if m.width == 0 || m.height == 0 {
 		return 1, 4, 20
 	}
-	topH = lipgloss.Height(renderTopBar(m.snapshot, m.width, m.currentSpinnerFrame()))
+	topH = lipgloss.Height(renderTopBar(m.snapshot, m.width, m.currentSpinnerFrame(), m.version))
 	inputH = lipgloss.Height(m.renderBottomBar())
 	bodyH = m.height - topH - inputH
 	if bodyH < 3 {
@@ -594,7 +596,7 @@ func (m Model) View() string {
 		return renderSimulationModal(m.width, m.height, m.simulator)
 	}
 
-	topBar := renderTopBar(m.snapshot, m.width, m.currentSpinnerFrame())
+	topBar := renderTopBar(m.snapshot, m.width, m.currentSpinnerFrame(), m.version)
 	inputBox := m.renderBottomBar()
 	_, inputH, bodyH := m.layoutHeights()
 

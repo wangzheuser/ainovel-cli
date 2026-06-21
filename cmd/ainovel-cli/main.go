@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/entry/headless"
 	"github.com/voocel/ainovel-cli/internal/entry/tui"
 	"github.com/voocel/ainovel-cli/internal/rules"
+	buildversion "github.com/voocel/ainovel-cli/internal/version"
 )
 
 var (
@@ -25,6 +27,17 @@ func main() {
 	opts, args, err := parseCLIOptions(os.Args[1:])
 	if err != nil {
 		die("flags: %v", err)
+	}
+	if opts.Version {
+		buildversion.Print(os.Stdout, versionInfo())
+		return
+	}
+	if opts.Update {
+		if err := runSelfUpdate(opts.UpdateVersion); err != nil {
+			fmt.Fprintf(os.Stderr, "update: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 	headlessMode = opts.Headless
 
@@ -98,16 +111,19 @@ func runWithConfig(cfg bootstrap.Config, opts cliOptions, args []string) {
 	if opts.Prompt != "" || opts.PromptFile != "" {
 		die("error: --prompt/--prompt-file 仅能在 --headless 模式下使用")
 	}
-	if err := tui.Run(cfg, bundle); err != nil {
+	if err := tui.Run(cfg, bundle, versionInfo().Version); err != nil {
 		die("error: %v", err)
 	}
 }
 
 type cliOptions struct {
-	ConfigPath string
-	Headless   bool
-	Prompt     string
-	PromptFile string
+	ConfigPath    string
+	Headless      bool
+	Prompt        string
+	PromptFile    string
+	Version       bool
+	Update        bool
+	UpdateVersion string
 }
 
 // parseCLIOptions 提取 CLI flag，返回选项和剩余参数。
@@ -116,6 +132,28 @@ func parseCLIOptions(argv []string) (cliOptions, []string, error) {
 	var args []string
 	for i := 0; i < len(argv); i++ {
 		switch argv[i] {
+		case "--version", "-v":
+			opts.Version = true
+		case "version":
+			if i+1 < len(argv) {
+				return opts, nil, fmt.Errorf("version 不接受参数")
+			}
+			opts.Version = true
+		case "update":
+			if opts.Update {
+				return opts, nil, fmt.Errorf("update 只能指定一次")
+			}
+			opts.Update = true
+			if i+1 < len(argv) {
+				if strings.HasPrefix(argv[i+1], "-") {
+					return opts, nil, fmt.Errorf("update 只接受一个可选版本参数")
+				}
+				opts.UpdateVersion = argv[i+1]
+				i++
+			}
+			if i+1 < len(argv) {
+				return opts, nil, fmt.Errorf("update 只接受一个可选版本参数")
+			}
 		case "--config":
 			if i+1 >= len(argv) {
 				return opts, nil, fmt.Errorf("--config 缺少值")
@@ -143,7 +181,41 @@ func parseCLIOptions(argv []string) (cliOptions, []string, error) {
 	if opts.Prompt != "" && opts.PromptFile != "" {
 		return opts, nil, fmt.Errorf("--prompt 和 --prompt-file 不能同时使用")
 	}
+	if opts.Version && (opts.Update || opts.ConfigPath != "" || opts.Headless || opts.Prompt != "" || opts.PromptFile != "" || len(args) > 0) {
+		return opts, nil, fmt.Errorf("version 不能与其他启动参数混用")
+	}
+	if opts.Update && (opts.ConfigPath != "" || opts.Headless || opts.Prompt != "" || opts.PromptFile != "" || len(args) > 0) {
+		return opts, nil, fmt.Errorf("update 不能与其他启动参数混用")
+	}
 	return opts, args, nil
+}
+
+func versionInfo() buildversion.Info {
+	return buildversion.Resolve(buildversion.Info{
+		Version: version,
+		Commit:  commit,
+		Date:    date,
+	})
+}
+
+func runSelfUpdate(target string) error {
+	info := versionInfo()
+	result, err := buildversion.Update(context.Background(), buildversion.UpdateOptions{
+		Repo:           "voocel/ainovel-cli",
+		BinaryName:     "ainovel-cli",
+		TargetVersion:  target,
+		CurrentVersion: info.Version,
+	})
+	if err != nil {
+		return err
+	}
+	if !result.Updated {
+		fmt.Printf("ainovel-cli 已是最新版本 %s\n", result.Version)
+		return nil
+	}
+	fmt.Printf("ainovel-cli 已更新到 %s\n", result.Version)
+	fmt.Printf("安装位置：%s\n", result.Path)
+	return nil
 }
 
 func loadPrompt(opts cliOptions) (string, error) {
