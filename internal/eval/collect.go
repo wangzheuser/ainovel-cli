@@ -1,15 +1,21 @@
 package eval
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/voocel/agentcore"
 	"github.com/voocel/ainovel-cli/internal/diag"
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/store"
+	"github.com/voocel/ainovel-cli/internal/stylestat"
 )
 
 // Collected 是一次运行产出的只读采集结果。全部来自已有评测器与事实层，eval 不自己重算。
@@ -21,6 +27,26 @@ type Collected struct {
 	Pending     map[string]bool // 残留信号：pending_commit/pending_steer/last_commit/last_review
 	LoadErrors  []string        // 契约依赖工件的真实读取失败（非"不存在"）；Grade 据此 hard fail
 	RuntimeErr  string          // runner 捕获的运行时错误（hard fail），空=无
+	Style       StyleCollection
+	Usage       UsageMetrics
+	ToolCalls   int
+}
+
+// StyleCollection 是从章节终稿中采集的全书文体事实。
+type StyleCollection struct {
+	Status string           `json:"status"` // ok / insufficient_sample
+	Stats  *stylestat.Stats `json:"stats,omitempty"`
+}
+
+// UsageMetrics 是 meta/usage.json 中已有的可靠成本/token 事实。
+type UsageMetrics struct {
+	Input         int     `json:"input,omitempty"`
+	Output        int     `json:"output,omitempty"`
+	CacheRead     int     `json:"cache_read,omitempty"`
+	CacheWrite    int     `json:"cache_write,omitempty"`
+	CostUSD       float64 `json:"cost_usd,omitempty"`
+	MissingUsage  int     `json:"missing_usage,omitempty"`
+	UsageRecorded bool    `json:"usage_recorded"`
 }
 
 // Collect 对一个已完成的输出目录做离线采集。runtimeErr 是 runner 驱动期间的错误（如有）。
@@ -62,6 +88,9 @@ func Collect(dir string, runtimeErr error) Collected {
 	if rm != nil && rm.PendingSteer != "" {
 		pending["pending_steer"] = true
 	}
+	style := collectStyle(s, prog, check)
+	usage := collectUsage(s, check)
+	toolCalls := countToolCalls(dir, check)
 
 	errStr := ""
 	if runtimeErr != nil {
@@ -75,7 +104,142 @@ func Collect(dir string, runtimeErr error) Collected {
 		Pending:     pending,
 		LoadErrors:  loadErrors,
 		RuntimeErr:  errStr,
+		Style:       style,
+		Usage:       usage,
+		ToolCalls:   toolCalls,
 	}
+}
+
+func collectStyle(s *store.Store, prog *domain.Progress, check func(string, error)) StyleCollection {
+	input := stylestat.Input{}
+	if prog != nil {
+		chapters := append([]int(nil), prog.CompletedChapters...)
+		sort.Ints(chapters)
+		for _, ch := range chapters {
+			text, err := s.Drafts.LoadChapterText(ch)
+			check(fmt.Sprintf("chapter:%d", ch), err)
+			if strings.TrimSpace(text) == "" {
+				check(fmt.Sprintf("chapter:%d", ch), fmt.Errorf("progress 标记已完成但终稿为空"))
+				continue
+			}
+			input.Chapters = append(input.Chapters, text)
+			input.Titles = append(input.Titles, chapterTitle(s, ch, text, check))
+		}
+	}
+	chars, err := s.Characters.Load()
+	check("characters", err)
+	for _, c := range chars {
+		if c.Name != "" {
+			input.Stopwords = append(input.Stopwords, c.Name)
+		}
+		input.Stopwords = append(input.Stopwords, c.Aliases...)
+	}
+
+	stats := stylestat.Compute(input)
+	if stats == nil {
+		return StyleCollection{Status: "insufficient_sample"}
+	}
+	return StyleCollection{Status: "ok", Stats: stats}
+}
+
+func chapterTitle(s *store.Store, chapter int, text string, check func(string, error)) string {
+	entries, err := s.Outline.LoadOutline()
+	check("outline", err)
+	for _, entry := range entries {
+		if entry.Chapter == chapter && strings.TrimSpace(entry.Title) != "" {
+			return entry.Title
+		}
+	}
+	volumes, err := s.Outline.LoadLayeredOutline()
+	check("layered_outline", err)
+	for _, v := range volumes {
+		for _, a := range v.Arcs {
+			for _, entry := range a.Chapters {
+				if entry.Chapter == chapter && strings.TrimSpace(entry.Title) != "" {
+					return entry.Title
+				}
+			}
+		}
+	}
+	return firstMarkdownTitle(text)
+}
+
+func firstMarkdownTitle(text string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		return strings.TrimSpace(strings.TrimLeft(line, "#"))
+	}
+	return ""
+}
+
+func collectUsage(s *store.Store, check func(string, error)) UsageMetrics {
+	state, err := s.Usage.Load()
+	check("usage", err)
+	if state == nil {
+		return UsageMetrics{}
+	}
+	return UsageMetrics{
+		Input:         state.Overall.Input,
+		Output:        state.Overall.Output,
+		CacheRead:     state.Overall.CacheRead,
+		CacheWrite:    state.Overall.CacheWrite,
+		CostUSD:       state.Overall.Cost,
+		MissingUsage:  state.MissingUsage,
+		UsageRecorded: true,
+	}
+}
+
+type sessionLine struct {
+	agentcore.Message
+}
+
+func countToolCalls(dir string, check func(string, error)) int {
+	sessionDir := filepath.Join(dir, "meta", "sessions")
+	var total int
+	err := filepath.WalkDir(sessionDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+		n, err := countToolCallsInFile(path)
+		if err != nil {
+			return err
+		}
+		total += n
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		check("sessions", err)
+	}
+	return total
+}
+
+func countToolCallsInFile(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	var total int
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
+	for sc.Scan() {
+		var sl sessionLine
+		if err := json.Unmarshal(sc.Bytes(), &sl); err != nil {
+			return 0, fmt.Errorf("%s: %w", path, err)
+		}
+		total += len(sl.Message.ToolCalls())
+	}
+	if err := sc.Err(); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 // HasCheckpoint 判断采集到的 checkpoint 中是否存在匹配 spec 的记录。

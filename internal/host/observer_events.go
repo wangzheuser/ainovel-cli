@@ -49,7 +49,7 @@ func (o *observer) handle(ev agentcore.Event) {
 			if ev.RetryInfo.Err != nil {
 				msg = ev.RetryInfo.Err.Error()
 			}
-			prefix := fmt.Sprintf("重试 (%d/%d): ", ev.RetryInfo.Attempt, ev.RetryInfo.MaxRetries)
+			prefix := retryPrefix(ev.RetryInfo.Attempt, ev.RetryInfo.MaxRetries, ev.RetryInfo.Delay)
 			retryEv := Event{
 				ID:       o.retryEventID("coordinator", ev.RetryInfo.Attempt),
 				Time:     time.Now(),
@@ -84,6 +84,27 @@ func (o *observer) handle(ev agentcore.Event) {
 			o.persistEvent(errEv)
 		}
 	}
+}
+
+func retryPrefix(attempt, maxRetries int, delay time.Duration) string {
+	if text := formatRetryDelay(delay); text != "" {
+		return fmt.Sprintf("重试 (%d/%d，%s后): ", attempt, maxRetries, text)
+	}
+	return fmt.Sprintf("重试 (%d/%d): ", attempt, maxRetries)
+}
+
+func formatRetryDelay(delay time.Duration) string {
+	if delay <= 0 {
+		return ""
+	}
+	seconds := int64(delay / time.Second)
+	if delay%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	return (time.Duration(seconds) * time.Second).String()
 }
 
 func (o *observer) handleMessageUpdate(ev agentcore.Event) {

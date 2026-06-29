@@ -4,8 +4,8 @@
 // 存在，eval 只做薄薄一层——批量驱动 case、采集产出、把 diag Finding 与 case 契约映射
 // 成门禁、聚合报告。一份事实定义，不在评测层重写一遍判断。详见 docs/evaluation-system.md。
 //
-// 本期（Phase 1 MVP）只做单次运行的绝对门禁：diag Findings + expect 契约 → PASS/WARN/FAIL。
-// A/B delta、stylestat 回归、LLM Judge 是之后的纯加法层。
+// 当前已覆盖确定性主线：单路门禁、baseline/variant A/B delta、repeat 聚合与 stylestat 回归。
+// LLM Judge 仍是可选后续层，不能污染确定性门禁。
 package eval
 
 import (
@@ -22,6 +22,8 @@ import (
 // caseIDPattern 限制 case id 为安全字符：id 会拼进输出目录并被 RunCase 的 RemoveAll 清理，
 // 禁止 . / 等路径字符，杜绝 "../" 路径穿越删到工作区外。
 var caseIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+const defaultDeltaRatio = 0.3
 
 // Case 是一个评测样本：一段创作需求 + 一组事实层断言。
 type Case struct {
@@ -51,9 +53,9 @@ type Expect struct {
 type Gate struct {
 	MaxSeverity string `json:"max_severity,omitempty"` // diag Finding 允许的最高严重度（默认 warning）：超过即 hard fail
 
-	MaxCostDeltaRatio     float64 `json:"max_cost_delta_ratio,omitempty"`
-	MaxToolCallDeltaRatio float64 `json:"max_tool_call_delta_ratio,omitempty"`
-	StylestatRegression   string  `json:"stylestat_regression,omitempty"`
+	MaxCostDeltaRatio     *float64 `json:"max_cost_delta_ratio,omitempty"`
+	MaxToolCallDeltaRatio *float64 `json:"max_tool_call_delta_ratio,omitempty"`
+	StylestatRegression   string   `json:"stylestat_regression,omitempty"`
 }
 
 // Validate 校验 case 必填字段。
@@ -73,7 +75,30 @@ func (c *Case) Validate() error {
 	if !validSeverity(c.Gate.MaxSeverity) {
 		return fmt.Errorf("case %q 的 gate.max_severity 非法: %s", c.ID, c.Gate.MaxSeverity)
 	}
+	if c.Gate.MaxCostDeltaRatio == nil {
+		c.Gate.MaxCostDeltaRatio = float64Ptr(defaultDeltaRatio)
+	}
+	if c.Gate.MaxToolCallDeltaRatio == nil {
+		c.Gate.MaxToolCallDeltaRatio = float64Ptr(defaultDeltaRatio)
+	}
+	if c.Gate.StylestatRegression == "" {
+		c.Gate.StylestatRegression = "warn"
+	}
+	if !validStylestatGate(c.Gate.StylestatRegression) {
+		return fmt.Errorf("case %q 的 gate.stylestat_regression 非法: %s", c.ID, c.Gate.StylestatRegression)
+	}
 	return nil
+}
+
+func float64Ptr(v float64) *float64 { return &v }
+
+func validStylestatGate(s string) bool {
+	switch s {
+	case "warn", "block", "off":
+		return true
+	default:
+		return false
+	}
 }
 
 // LoadCases 从单个 .json 文件或目录加载 case。目录下所有 *.json 递归加载，按 id 排序。

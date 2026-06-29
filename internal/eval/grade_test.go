@@ -7,6 +7,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/diag"
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/store"
+	"github.com/voocel/ainovel-cli/internal/stylestat"
 )
 
 // writerSmokeCase 是一个典型的 writer 第一章 smoke case，用于门禁测试。
@@ -150,6 +151,94 @@ func TestGradeLoadErrorFails(t *testing.T) {
 	}
 }
 
+func TestGradeDeltaStylestatWarnAndBlock(t *testing.T) {
+	base := cleanResult()
+	base.Metrics.Stylestat = &stylestat.Stats{
+		Patterns: []stylestat.PatternStat{{Name: "p", PerChapter: 1}},
+		Ending:   stylestat.EndingStat{ShortRatio: 0.2},
+	}
+	variant := cleanResult()
+	variant.Metrics.Stylestat = &stylestat.Stats{
+		Patterns:          []stylestat.PatternStat{{Name: "p", PerChapter: 2}},
+		RepeatedSentences: []stylestat.SentenceStat{{Text: "重复句", Chapters: 3, Count: 3}},
+		Ending:            stylestat.EndingStat{ShortRatio: 0.5},
+	}
+
+	c := writerSmokeCase()
+	c.Gate.StylestatRegression = "warn"
+	d := GradeDelta(c, base, variant)
+	if d.Outcome != Warn {
+		t.Fatalf("stylestat 回归默认应 WARN，得到 %s", d.Outcome)
+	}
+	if !hasIssue(d.Warnings, "delta:stylestat", "文体指标回归") {
+		t.Fatalf("应报告 stylestat warning，实际 %+v", d.Warnings)
+	}
+
+	c.Gate.StylestatRegression = "block"
+	d = GradeDelta(c, base, variant)
+	if d.Outcome != Fail {
+		t.Fatalf("stylestat block 应 FAIL，得到 %s", d.Outcome)
+	}
+	if !hasIssue(d.HardFails, "delta:stylestat", "文体指标回归") {
+		t.Fatalf("应报告 stylestat hard fail，实际 %+v", d.HardFails)
+	}
+}
+
+func TestGradeDeltaTitleMixedUsesMinorityCount(t *testing.T) {
+	base := cleanResult()
+	base.Metrics.Stylestat = &stylestat.Stats{
+		TitleFormats: &stylestat.TitleStat{WithPrefix: 2, WithoutPrefix: 3},
+	}
+	variant := cleanResult()
+	variant.Metrics.Stylestat = &stylestat.Stats{
+		TitleFormats: &stylestat.TitleStat{WithPrefix: 2, WithoutPrefix: 5},
+	}
+
+	d := GradeDelta(writerSmokeCase(), base, variant)
+	if d.Metrics.Stylestat == nil {
+		t.Fatal("应产生 stylestat delta")
+	}
+	if d.Metrics.Stylestat.TitleMixedDelta != 0 {
+		t.Fatalf("少数派格式未增加时不应误报标题混用回归，得到 %+d", d.Metrics.Stylestat.TitleMixedDelta)
+	}
+	if d.Outcome != Pass {
+		t.Fatalf("仅增加多数派标题数量不应改变门禁，得到 %s issues=%+v", d.Outcome, d.Warnings)
+	}
+}
+
+func TestGradeDeltaCostAndToolCallThresholds(t *testing.T) {
+	base := cleanResult()
+	base.Metrics.ToolCalls = 10
+	base.Metrics.Usage = UsageMetrics{UsageRecorded: true, CostUSD: 1, Input: 100, Output: 100}
+	variant := cleanResult()
+	variant.Metrics.ToolCalls = 14
+	variant.Metrics.Usage = UsageMetrics{UsageRecorded: true, CostUSD: 1.4, Input: 150, Output: 140}
+
+	c := writerSmokeCase()
+	c.Gate.MaxToolCallDeltaRatio = float64Ptr(0.3)
+	c.Gate.MaxCostDeltaRatio = float64Ptr(0.3)
+	d := GradeDelta(c, base, variant)
+	if d.Outcome != Warn {
+		t.Fatalf("成本/tool_calls 超阈值应 WARN，得到 %s", d.Outcome)
+	}
+	if !hasIssue(d.Warnings, "delta:tool_calls", "超过阈值") {
+		t.Fatalf("应报告 tool_calls 回归，实际 %+v", d.Warnings)
+	}
+	if !hasIssue(d.Warnings, "delta:cost", "超过阈值") {
+		t.Fatalf("应报告 cost 回归，实际 %+v", d.Warnings)
+	}
+}
+
+func TestGradeDeltaInsufficientStylestatIsNote(t *testing.T) {
+	d := GradeDelta(writerSmokeCase(), cleanResult(), cleanResult())
+	if d.Outcome != Pass {
+		t.Fatalf("样本不足不应改变门禁，得到 %s", d.Outcome)
+	}
+	if !hasIssue(d.Notes, "stylestat", "样本不足") {
+		t.Fatalf("应记录 stylestat 样本不足 note，实际 %+v", d.Notes)
+	}
+}
+
 func TestParseCheckpointSpec(t *testing.T) {
 	cases := []struct {
 		spec  string
@@ -179,6 +268,12 @@ func TestParseCheckpointSpec(t *testing.T) {
 			t.Errorf("%s: 解析为 kind=%s step=%s", tc.spec, scope.Kind, step)
 		}
 	}
+}
+
+func cleanResult() Result {
+	r := Grade(writerSmokeCase(), cleanCollected())
+	r.Metrics.TotalWords = 1000
+	return r
 }
 
 // TestCollectReadsCheckpoints 验证真实 store 读取路径：写入 checkpoint 后 Collect 能命中契约。
