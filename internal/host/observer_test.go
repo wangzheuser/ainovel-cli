@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/voocel/agentcore"
 )
@@ -61,6 +62,7 @@ func TestObserverRetryEventsUpdateSameLine(t *testing.T) {
 		RetryInfo: &agentcore.RetryInfo{
 			Attempt:    1,
 			MaxRetries: 7,
+			Delay:      2 * time.Second,
 			Err:        errors.New("server 500"),
 		},
 	})
@@ -69,6 +71,7 @@ func TestObserverRetryEventsUpdateSameLine(t *testing.T) {
 		RetryInfo: &agentcore.RetryInfo{
 			Attempt:    2,
 			MaxRetries: 7,
+			Delay:      4 * time.Second,
 			Err:        errors.New("server 500 again"),
 		},
 	})
@@ -79,7 +82,7 @@ func TestObserverRetryEventsUpdateSameLine(t *testing.T) {
 	if events[0].ID == "" || events[1].ID != events[0].ID {
 		t.Fatalf("retry events should share ID for TUI in-place update: %+v", events)
 	}
-	if !strings.Contains(events[1].Summary, "重试 (2/7)") {
+	if !strings.Contains(events[1].Summary, "重试 (2/7，4s后)") {
 		t.Fatalf("summary = %q, want updated retry count", events[1].Summary)
 	}
 }
