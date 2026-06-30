@@ -42,6 +42,7 @@ type UISnapshot struct {
 	NovelName          string
 	ModelName          string
 	ModelContextWindow int // 当前默认模型的上下文窗口（随 /model 切换实时解析）
+	ThinkingLevel      string
 	Style              string
 	RuntimeState       string // idle / running / pausing / paused / completed
 	StatusLabel        string

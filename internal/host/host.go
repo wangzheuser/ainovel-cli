@@ -641,6 +641,7 @@ func (h *Host) Snapshot() UISnapshot {
 		Provider:               provider,
 		ModelName:              model,
 		ModelContextWindow:     modelWindow,
+		ThinkingLevel:          h.cfg.ResolveReasoningEffort("default"),
 		Style:                  h.cfg.Style,
 		RuntimeState:           string(state),
 		IsRunning:              state == lifecycleRunning,

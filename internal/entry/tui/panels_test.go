@@ -17,3 +17,25 @@ func TestRenderTopBarShowsVersion(t *testing.T) {
 		t.Fatalf("top bar missing version: %q", out)
 	}
 }
+
+func TestBuildRightInfoShowsThinkingLevelAfterModel(t *testing.T) {
+	out := buildRightInfo(host.UISnapshot{
+		Provider:           "openrouter",
+		ModelName:          "test-model",
+		ModelContextWindow: 200000,
+		ThinkingLevel:      "medium",
+	}, "/tmp/output")
+	if !strings.Contains(out, "test-model(200K,med)") {
+		t.Fatalf("right info missing compact thinking level: %q", out)
+	}
+}
+
+func TestBuildRightInfoShowsAutoThinkingWhenUnset(t *testing.T) {
+	out := buildRightInfo(host.UISnapshot{
+		ModelName:          "test-model",
+		ModelContextWindow: 128000,
+	}, "")
+	if !strings.Contains(out, "test-model(128K,auto)") {
+		t.Fatalf("right info missing auto thinking level: %q", out)
+	}
+}

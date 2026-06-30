@@ -51,8 +51,8 @@ func buildRightInfo(snap host.UISnapshot, outputDir string) string {
 		parts = append(parts, snap.Provider)
 	}
 	if snap.ModelName != "" {
-		if w := formatContextWindow(snap.ModelContextWindow); w != "" {
-			parts = append(parts, snap.ModelName+"("+w+")")
+		if suffix := modelInfoSuffix(snap); suffix != "" {
+			parts = append(parts, snap.ModelName+"("+suffix+")")
 		} else {
 			parts = append(parts, snap.ModelName)
 		}
@@ -68,6 +68,28 @@ func buildRightInfo(snap host.UISnapshot, outputDir string) string {
 		return lipgloss.NewStyle().Foreground(colorDim).Render("READY")
 	}
 	return lipgloss.NewStyle().Foreground(colorDim).Render(strings.Join(parts, " · "))
+}
+
+func modelInfoSuffix(snap host.UISnapshot) string {
+	var parts []string
+	if w := formatContextWindow(snap.ModelContextWindow); w != "" {
+		parts = append(parts, w)
+	}
+	if t := formatThinkingLevel(snap.ThinkingLevel); t != "" {
+		parts = append(parts, t)
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatThinkingLevel(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "":
+		return "auto"
+	case "medium":
+		return "med"
+	default:
+		return strings.ToLower(strings.TrimSpace(level))
+	}
 }
 
 func joinInlineSides(left, right string, width int) string {

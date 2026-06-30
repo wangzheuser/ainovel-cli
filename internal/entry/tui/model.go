@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -90,6 +91,7 @@ type Model struct {
 	hoverPane      focusPane
 	hoverActive    bool
 	mode           appMode
+	starting       bool // UI 已进入工作台，Host 正在执行启动初始化
 	startupMode    startupMode
 	cocreateSeq    int
 	reportSeq      int
@@ -107,7 +109,7 @@ type Model struct {
 func NewModel(rt *host.Host, bridge *askUserBridge, version string) Model {
 	ta := textarea.New()
 	ta.Placeholder = placeholderForNewMode(startupModeQuick)
-	ta.CharLimit = 2000
+	ta.CharLimit = 5000
 	ta.SetHeight(1)
 	// MaxHeight=6 让超长输入按宽度自动 wrap 显示成多行（视觉上限 6 行）。
 	ta.MaxHeight = 6
@@ -234,7 +236,11 @@ func (m *Model) flushStreamIfDirty() bool {
 func (m *Model) refreshEventViewport() {
 	centerW := m.eventFlowWidth()
 	content := renderEventContent(m.events, centerW, m.toolSpinnerIdx)
-	if activity := renderEventActivity(m.snapshot, m.spinnerIdx, centerW); activity != "" {
+	snap := m.snapshot
+	if m.starting {
+		snap.IsRunning = true
+	}
+	if activity := renderEventActivity(snap, m.spinnerIdx, centerW); activity != "" {
 		if strings.TrimSpace(content) != "" {
 			content += "\n" + activity
 		} else {
@@ -429,11 +435,12 @@ func (m *Model) inputHints() string {
 	if m.quitPending {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Bold(true).Render("Press Ctrl+C again to exit")
 	}
+	limitHint := m.inputLimitHint()
 	// 欢迎页(modeNew)不开鼠标上报，终端原生拖拽即可复制，无需 Ctrl+R 提示；
 	// 工作台才开上报，复制需 Ctrl+R 临时关闭。
-	suffix := " · Ctrl+R 切到选中复制模式"
+	suffix := limitHint + " · Ctrl+R 切到选中复制模式"
 	if m.mode == modeNew {
-		suffix = ""
+		suffix = limitHint
 	}
 	if m.mouseOff && m.mode != modeNew {
 		// 工作台手动切到选中复制：用强调色提示当前处于"自由拖拽选中"状态，按 Ctrl+R 恢复
@@ -473,6 +480,18 @@ func (m *Model) inputHints() string {
 	return dimStyle.Render("输入 / 搜索命令 · 点击/Tab 切换面板 · ↑↓ 滚动 · End 跳底 · Ctrl+L 清屏 · Esc 暂停 · Enter 发送" + suffix)
 }
 
+func (m *Model) inputLimitHint() string {
+	limit := m.textarea.CharLimit
+	if limit <= 0 {
+		return ""
+	}
+	used := m.textarea.Length()
+	if used < limit*4/5 {
+		return ""
+	}
+	return fmt.Sprintf(" · 输入 %d/%d", used, limit)
+}
+
 func (m *Model) eventFlowWidth() int {
 	if m.width == 0 {
 		return 80
@@ -502,7 +521,7 @@ func (m *Model) bodyHeight() int {
 }
 
 func (m *Model) currentSpinnerFrame() string {
-	if !m.snapshot.IsRunning {
+	if !m.snapshot.IsRunning && !m.starting {
 		return ""
 	}
 	return spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
@@ -521,6 +540,10 @@ func defaultSteerPlaceholder() string {
 
 func (m *Model) syncRuntimePlaceholder() {
 	if m.mode != modeRunning || m.cocreate != nil {
+		return
+	}
+	if m.starting {
+		m.textarea.Placeholder = "正在初始化创作..."
 		return
 	}
 	switch m.snapshot.RuntimeState {
@@ -623,7 +646,7 @@ func (m Model) View() string {
 		}
 
 		eventFlow := renderEventFlowViewport(m.viewport, centerW, eventH, m.paneHighlighted(focusEvents))
-		streamPanel := renderStreamPanel(m.streamVP, centerW, streamH, m.paneHighlighted(focusStream), m.snapshot.IsRunning, m.spinnerIdx)
+		streamPanel := renderStreamPanel(m.streamVP, centerW, streamH, m.paneHighlighted(focusStream), m.snapshot.IsRunning || m.starting, m.spinnerIdx)
 		center := lipgloss.JoinVertical(lipgloss.Left, eventFlow, streamPanel)
 
 		left := renderStatePanel(m.stateVP, leftW, bodyH, m.paneHighlighted(focusState))
@@ -737,9 +760,8 @@ func (m Model) handleCoCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = err
 			return m, nil
 		}
-		state.awaiting = true
-		m.textarea.Blur()
-		return m, startRuntime(m.runtime, plan)
+		cmd := m.enterStarting(plan.RawPrompt)
+		return m, tea.Batch(startRuntime(m.runtime, plan), cmd)
 	case tea.KeyEnter:
 		// Alt+Enter → 主动换行，让 textarea.Update 接管（KeyMap.InsertNewline 已绑此键）
 		if msg.Alt {

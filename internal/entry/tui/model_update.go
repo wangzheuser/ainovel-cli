@@ -12,6 +12,8 @@ import (
 	"github.com/voocel/ainovel-cli/internal/utils"
 )
 
+const maxPromptEventRunes = 160
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -301,7 +303,8 @@ func (m Model) handleEnterKey() (tea.Model, tea.Cmd) {
 				m.err = err
 				return m, nil
 			}
-			return m, startRuntime(m.runtime, plan)
+			cmd := m.enterStarting(plan.RawPrompt)
+			return m, tea.Batch(startRuntime(m.runtime, plan), cmd)
 		}
 		m.cocreate = newCoCreateState(text)
 		return m, m.sendCoCreate()
@@ -614,6 +617,8 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 func (m Model) handleStartResultMsg(msg startResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.err = msg.err
+		wasStarting := m.starting
+		m.starting = false
 		if m.mode != modeNew {
 			m.applyEvent(host.Event{
 				Time: time.Now(), Category: "ERROR", Summary: msg.err.Error(), Level: "error",
@@ -625,12 +630,19 @@ func (m Model) handleStartResultMsg(msg startResultMsg) (tea.Model, tea.Cmd) {
 			m.textarea.Placeholder = placeholderForCoCreate(m.cocreate)
 			return m, tea.Batch(fetchSnapshot(m.runtime), m.textarea.Focus())
 		}
+		if wasStarting {
+			m.mode = modeNew
+			m.snapshot.IsRunning = false
+			m.textarea.Placeholder = placeholderForNewMode(m.startupMode)
+			return m, tea.Batch(fetchSnapshot(m.runtime), m.textarea.Focus(), tea.DisableMouse)
+		}
 		if m.mode == modeNew {
 			m.textarea.Placeholder = placeholderForNewMode(m.startupMode)
 			return m, tea.Batch(fetchSnapshot(m.runtime), m.textarea.Focus())
 		}
 		return m, fetchSnapshot(m.runtime)
 	}
+	m.starting = false
 
 	if m.mode == modeNew {
 		m.cocreate = nil
@@ -641,6 +653,40 @@ func (m Model) handleStartResultMsg(msg startResultMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, fetchSnapshot(m.runtime)
+}
+
+func (m *Model) enterStarting(rawPrompt string) tea.Cmd {
+	m.cocreate = nil
+	m.err = nil
+	m.starting = true
+	m.snapshot.IsRunning = true
+	m.snapshot.RuntimeState = "running"
+	enableMouse := m.enterRunning()
+	m.resetOutputPanels()
+	m.resizeTextarea()
+	m.textarea.Placeholder = "正在初始化创作..."
+	m.applyStartupPromptEvent(rawPrompt)
+	m.applyEvent(host.Event{
+		Time: time.Now(), Category: "SYSTEM", Summary: "正在初始化创作", Level: "info",
+	})
+	m.refreshEventViewport()
+	m.refreshStreamViewport()
+	m.refreshStateViewport()
+	return tea.Batch(m.textarea.Focus(), enableMouse)
+}
+
+func (m *Model) applyStartupPromptEvent(rawPrompt string) {
+	text := utils.CleanInputLine(rawPrompt)
+	if text == "" {
+		return
+	}
+	m.applyEvent(host.Event{
+		Time:     time.Now(),
+		Category: "USER",
+		Summary:  "创作需求: " + truncate(text, maxPromptEventRunes),
+		Detail:   text,
+		Level:    "info",
+	})
 }
 
 func (m Model) handleCoCreateDoneMsg(msg cocreateDoneMsg) (tea.Model, tea.Cmd) {
