@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,9 +16,9 @@ import (
 	"github.com/voocel/agentcore/subagent"
 	"github.com/voocel/ainovel-cli/assets"
 	"github.com/voocel/ainovel-cli/internal/agents/ctxpack"
+	"github.com/voocel/ainovel-cli/internal/agents/guard"
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/domain"
-	"github.com/voocel/ainovel-cli/internal/host/reminder"
 	"github.com/voocel/ainovel-cli/internal/rules"
 	"github.com/voocel/ainovel-cli/internal/store"
 	"github.com/voocel/ainovel-cli/internal/tools"
@@ -112,7 +110,7 @@ func resolvedRoleThinking(model agentcore.ChatModel, cfg bootstrap.Config, role 
 // 自动重建，不需要 ref；只有常驻的 coordinator 需要），并通过 ApplyThinking 联动各角色
 // 推理强度。Host 层通过 Agent.Subscribe 获取事件流,不再需要 emit 回调。
 // onGuardBlock 可选（nil 安全）：所有 StopGuard（coordinator + 各子代理）的拦截/升级
-// 审计回调，Host 用它把拦截事实浮出到 TUI 事件流，见 reminder.BlockHook。
+// 审计回调，Host 用它把拦截事实浮出到 TUI 事件流，见 guard.BlockHook。
 func BuildCoordinator(
 	cfg bootstrap.Config,
 	store *store.Store,
@@ -120,7 +118,7 @@ func BuildCoordinator(
 	bundle assets.Bundle,
 	recordUsage UsageRecorder,
 	onFlowBoundary FlowBoundaryHook,
-	onGuardBlock reminder.BlockHook,
+	onGuardBlock guard.BlockHook,
 ) (*agentcore.Agent, *tools.AskUserTool, *ctxpack.WriterRestorePack, *corecontext.ContextEngine, ApplyThinking) {
 	// 共享工具
 	contextTool := tools.NewContextTool(store, bundle.References, cfg.Style)
@@ -207,7 +205,7 @@ func BuildCoordinator(
 	cacheBase := promptCacheBase(store.Dir())
 
 	architectStopGuardFactory := func(_, _ string) agentcore.StopGuard {
-		return reminder.NewArchitectStopGuard(store, onGuardBlock)
+		return guard.NewArchitectStopGuard(store, onGuardBlock)
 	}
 	architectThinking, _ := ResolveThinkingForModel(architectModel, roleThinking(cfg, "architect"))
 	architectShort := subagent.Config{
@@ -269,7 +267,7 @@ func BuildCoordinator(
 		CacheLastMessage:   "ephemeral",
 		PromptCacheKey:     cacheBase + "-writer",
 		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
-			return reminder.NewWriterStopGuard(store, onGuardBlock)
+			return guard.NewWriterStopGuard(store, onGuardBlock)
 		},
 		ContextManagerFactory: func(model agentcore.ChatModel) agentcore.ContextManager {
 			// 每次 subagent(writer) 调用都会重建，从当前 runModel 读取最新模型名。
@@ -318,15 +316,14 @@ func BuildCoordinator(
 		OnMessage:          onMsg,
 		CacheLastMessage:   "ephemeral",
 		PromptCacheKey:     cacheBase + "-editor",
-		// 仅摘要类终态产物命中即停；save_review 不再硬停——StopAfterTool 退出会绕过
-		// StopGuard（agentcore loop.go），若 save_review 硬停，"被派生成弧摘要却先复核"
-		// 的 editor 会在 save_review 处被砍断、够不到 save_arc_summary。评审/摘要任务的
-		// 收尾改由任务感知的 NewEditorStopGuard 把关。
+		// 终态产物命中即停。终态退出仍会咨询 StopGuard（契约测试 TestContract_
+		// TerminalToolExitConsultsStopGuard），任务感知的 NewEditorStopGuard 负责
+		// 否决"被派生成摘要却只做了复核"的提前退出，所以 save_review 可以安全硬停。
 		StopAfterToolResult: func(toolName string, _ json.RawMessage) bool {
-			return toolName == "save_arc_summary" || toolName == "save_volume_summary"
+			return toolName == "save_review" || toolName == "save_arc_summary" || toolName == "save_volume_summary"
 		},
 		StopGuardFactory: func(_, task string) agentcore.StopGuard {
-			return reminder.NewEditorStopGuard(store, task, onGuardBlock)
+			return guard.NewEditorStopGuard(store, task, onGuardBlock)
 		},
 	}
 
@@ -354,7 +351,7 @@ func BuildCoordinator(
 		agentcore.WithCacheLastMessage("ephemeral"),
 		agentcore.WithPromptCacheKey(cacheBase+"-coordinator"),
 		agentcore.WithContextManager(coordinatorEngine),
-		agentcore.WithStopGuard(reminder.NewStopGuard(store, onGuardBlock)),
+		agentcore.WithStopGuard(guard.NewStopGuard(store, onGuardBlock)),
 		agentcore.WithMiddlewares(flowBoundaryMiddleware(onFlowBoundary)),
 		// phase=complete 时硬拦截 subagent 派发，防止 Writer 死循环。
 		agentcore.WithToolGate(combineToolGates(
@@ -439,6 +436,10 @@ func combineToolGates(gates ...agentcore.ToolGate) agentcore.ToolGate {
 	}
 }
 
+// writerExpandedChapterGate 在派发 writer 前快速失败：目标章节未展开时拒绝派发，
+// 省掉一次注定失败的 subagent spawn。目标章节只从 store 事实推导（重写队列头，
+// 否则下一章）——writer 实际要写哪一章由同一事实决定，任务文本里的章节号不参与
+// 判断；真正的逐章校验在 plan_chapter/draft_chapter 工具层，那里用的是真实参数。
 func writerExpandedChapterGate(st *store.Store) agentcore.ToolGate {
 	return func(_ context.Context, req agentcore.GateRequest) (*agentcore.GateDecision, error) {
 		if req.Call.Name != "subagent" {
@@ -446,15 +447,11 @@ func writerExpandedChapterGate(st *store.Store) agentcore.ToolGate {
 		}
 		var args struct {
 			Agent string `json:"agent"`
-			Task  string `json:"task"`
 		}
 		if err := json.Unmarshal(req.Call.Args, &args); err != nil || args.Agent != "writer" {
 			return nil, nil
 		}
-		chapter := chapterFromTask(args.Task)
-		if chapter <= 0 {
-			chapter = writerFallbackChapter(st)
-		}
+		chapter := writerTargetChapter(st)
 		if chapter <= 0 {
 			return nil, nil
 		}
@@ -468,7 +465,9 @@ func writerExpandedChapterGate(st *store.Store) agentcore.ToolGate {
 	}
 }
 
-func writerFallbackChapter(st *store.Store) int {
+// writerTargetChapter 推导 writer 下一次派发实际会写的章节：重写队列优先，
+// 否则顺写下一章。读失败按"无法判定"处理（fail-open，与 completePhaseGate 一致）。
+func writerTargetChapter(st *store.Store) int {
 	if st == nil {
 		return 0
 	}
@@ -480,17 +479,6 @@ func writerFallbackChapter(st *store.Store) int {
 		return progress.PendingRewrites[0]
 	}
 	return progress.NextChapter()
-}
-
-var chapterTaskRe = regexp.MustCompile(`第\s*(\d+)\s*章`)
-
-func chapterFromTask(task string) int {
-	m := chapterTaskRe.FindStringSubmatch(task)
-	if len(m) < 2 {
-		return 0
-	}
-	n, _ := strconv.Atoi(m[1])
-	return n
 }
 
 type saveFoundationResult struct {

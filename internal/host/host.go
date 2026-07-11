@@ -19,7 +19,6 @@ import (
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/host/exp"
-	"github.com/voocel/ainovel-cli/internal/host/flow"
 	"github.com/voocel/ainovel-cli/internal/host/imp"
 	"github.com/voocel/ainovel-cli/internal/host/sim"
 	modelreg "github.com/voocel/ainovel-cli/internal/models"
@@ -44,7 +43,7 @@ type Host struct {
 	askUser           *tools.AskUserTool
 	writerRestore     *ctxpack.WriterRestorePack
 	observer          *observer
-	router            *flow.Dispatcher
+	router            *Dispatcher
 	usage             *UsageTracker
 	usageCancel       context.CancelFunc // 停掉 autoSaveLoop 并触发最后一次 flush
 	budget            *BudgetSentinel    // 预算政策；未启用为 nil（方法 nil 安全）
@@ -116,7 +115,7 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 	usageCtx, usageCancel := context.WithCancel(context.Background())
 	usage.StartAutoSave(usageCtx)
 
-	var router *flow.Dispatcher
+	var router *Dispatcher
 	var budget *BudgetSentinel
 	var pauser *PausePointSentinel
 	// onGuardBlock 与 router/budget 同款前置声明：h 构造后才能挂事件浮出闭包。
@@ -196,7 +195,7 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 		},
 	)
 	pauser = h.pauser
-	h.router = flow.NewDispatcher(coordinator, store)
+	h.router = NewDispatcher(coordinator, store)
 	router = h.router
 	// 重复指令告警：纯 telemetry，挂机时"模型可能在原地打转"值得喊人看一眼。
 	// 事件流与 notify 成对发出——notify 只是屏内事件的离屏副本（架构 §2.3）。

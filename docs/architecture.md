@@ -52,7 +52,7 @@ UI、诊断、事件日志都是从事件流 / 只读工件投影出来的被动
 
 **铁律一：工具只返事实，不返跨调度指令**。`commit_chapter` 返回 `arc_end_reached` / `next_skeleton_arc` 等结构化字段；不夹带 `[系统]` 类指令字符串。子代理内的 `next_step` 字段是事实陈述的内联指引（"我刚保存了 plan，下一步是 draft"），不算违反——见 §6.4。
 
-**铁律二：流程路由由 Flow Router 承担**。`internal/host/flow/router.go` 的 `Route(state) → *Instruction` 是纯函数；Host 在 Coordinator 工具执行链的同步边界触发 `Dispatch`，用 `Steer` 把 `[Host 下达指令]` 放进当前 run 的下一轮输入。返回 nil 表示"裁定场景，让 LLM 自主"。**指令通道不沉默**：Route 连续算出同一指令（说明上次派发后状态未推进）时，Dispatcher 附"第 N 次下达"事实重发而非静默吞掉——"路由结果重复"是只有 Host 能观测到的事实，沉默会让 Coordinator 落入"无指令不得行动 / StopGuard 不许停"的双重矛盾。不设阈值、不熔断，如何脱困由 LLM 裁定。
+**铁律二：流程路由由 Flow Router 承担**。`internal/flow/router.go` 的 `Route(state) → *Instruction` 是纯函数；Host 在 Coordinator 工具执行链的同步边界触发 `Dispatch`，用 `Steer` 把 `[Host 下达指令]` 放进当前 run 的下一轮输入。返回 nil 表示"裁定场景，让 LLM 自主"。**指令通道不沉默**：Route 连续算出同一指令（说明上次派发后状态未推进）时，Dispatcher 附"第 N 次下达"事实重发而非静默吞掉——"路由结果重复"是只有 Host 能观测到的事实，沉默会让 Coordinator 落入"无指令不得行动 / StopGuard 不许停"的双重矛盾。不设阈值、不熔断，如何脱困由 LLM 裁定。
 
 **铁律三：Coordinator 不能物理 end_turn，除非 Phase=Complete**。StopGuard 在 agentcore 层拦截 `end_turn` 注入 user message；连续 5 次拦不住升级 terminate。三个子代理（architect / writer / editor）有各自的 `CheckpointDeltaGuard`。
 
@@ -221,7 +221,7 @@ agent := agentcore.NewAgent(
     agentcore.WithMaxToolErrors(0),  // subagent 不熔断
     agentcore.WithMaxRetries(subagentMaxRetries),
     agentcore.WithContextManager(...),
-    agentcore.WithStopGuard(reminder.NewStopGuard(store, nil)),
+    agentcore.WithStopGuard(guard.NewStopGuard(store, nil)),
     agentcore.WithToolGate(completePhaseGate(store)),  // phase=complete 硬拦 subagent 派发
 )
 ```
@@ -264,8 +264,8 @@ Store (协作媒介，子代理之间不直接通信)
 
 | 层 | 落点 | 作用 |
 |---|---|---|
-| `StopAfterTools` / `StopAfterToolResult` | `agents/build.go` SubAgentConfig | 关键工具成功即 end_turn 退出 subagent run。Writer `commit_chapter` 命中即停（`StopAfterTools`）；Editor 的 `save_arc_summary`/`save_volume_summary`、Architect 弧/卷收尾走 `StopAfterToolResult`。Editor 的 `save_review` 不硬停——否则绕过 StopGuard 砍断弧摘要 run，收尾交 `NewEditorStopGuard` |
-| `CheckpointDeltaGuard` | `host/reminder/subagent_guards.go` | 以 baseline checkpoint 为分界，本轮结束前必须看到对应 step 的新 checkpoint，否则拒绝 `end_turn`；连续拦 3 次升级 terminate（弱模型死循环兜底） |
+| `StopAfterTools` / `StopAfterToolResult` | `agents/build.go` SubAgentConfig | 关键工具成功即退出 subagent run（终态退出仍咨询 StopGuard，见契约测试）。Writer `commit_chapter` 命中即停（`StopAfterTools`）；Editor 的 `save_review`/`save_arc_summary`/`save_volume_summary`、Architect 弧/卷收尾走 `StopAfterToolResult`。摘要任务中 editor 只做复核就想退出时由任务感知的 `NewEditorStopGuard` 否决 |
+| `CheckpointDeltaGuard` | `agents/guard/subagent_guards.go` | 以 baseline checkpoint 为分界，本轮结束前必须看到对应 step 的新 checkpoint，否则拒绝 `end_turn`；连续拦 3 次升级 terminate（弱模型死循环兜底） |
 | 工具内联 `next_step` | 各工具返回值字段 | 每个事实自带"下一步建议"。如 `plan_chapter` 返回 `next_step: "立即调用 draft_chapter..."`。LLM 看到事实就知道下一步，不用回到 system prompt 找 |
 | 工具内归属/前置检查 | `edit_chapter` `commit_chapter` 等 | 数据层物理拦截：`edit_chapter` 拒绝改未列入 `PendingRewrites` 的已完成章；`commit_chapter` 拒绝草稿==终稿的空提交；`ConcurrencySafe=false` 阻止并发竞态 |
 
@@ -446,11 +446,12 @@ internal/
                   drafts / summaries / characters / world / signals / run_meta / runtime / session
   tools/          11 个 Agent 工具，写类全部原子三件套 + digest 幂等 + ConcurrencySafe=false
                   + premise_structure (save_foundation 内部用) + ask_user
+  flow/           路由策略（纯函数 + IO 边界）：router.go (Route 11 分支) + state.go (LoadState)
+                  + pause.go (停靠点裁定)
   agents/         build.go 装配 Coordinator + 三子代理；ctxpack/ Writer 上下文压缩策略
-  host/           host.go + resume.go + observer.go + events.go + usage.go + usage_replay.go
-                  + stream_extract.go + cocreate.go
-    flow/         router.go (纯函数 11 分支) + state.go + dispatcher.go + router_test.go
-    reminder/     stop_guard.go (Coordinator) + subagent_guards.go (CheckpointDeltaGuard ×3)
+    guard/        stop_guard.go (Coordinator StopGuard) + subagent_guards.go (CheckpointDeltaGuard ×3)
+  host/           host.go + dispatcher.go (工具边界下达路由指令) + resume.go + observer.go
+                  + events.go + usage.go + usage_replay.go + stream_extract.go + cocreate.go
     imp/          外部小说反推导入：split → foundation → 逐章分析
     exp/          已完成章节导出：合并章节 → TXT / EPUB 3，路径后缀驱动；纯只读，不依赖 LLM
   entry/          tui (Bubble Tea) / headless / startup

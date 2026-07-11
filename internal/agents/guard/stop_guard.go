@@ -1,4 +1,4 @@
-package reminder
+package guard
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 
 	"github.com/voocel/agentcore"
 	"github.com/voocel/ainovel-cli/internal/domain"
-	"github.com/voocel/ainovel-cli/internal/host/flow"
+	"github.com/voocel/ainovel-cli/internal/flow"
 	"github.com/voocel/ainovel-cli/internal/store"
 )
 
@@ -45,7 +45,7 @@ func NewStopGuard(st *store.Store, onBlock BlockHook) agentcore.StopGuard {
 		n := consecutive.Add(1)
 		if n > maxConsecutiveBlocks {
 			slog.Error("stop_guard 连续阻拦超限，升级为终止",
-				"module", "host.reminder", "turn", info.TurnIndex, "consecutive", n)
+				"module", "agent.guard", "turn", info.TurnIndex, "consecutive", n)
 			if onBlock != nil {
 				onBlock("coordinator", "escalated", n)
 			}
@@ -56,7 +56,7 @@ func NewStopGuard(st *store.Store, onBlock BlockHook) agentcore.StopGuard {
 			inject = fmt.Sprintf("禁止结束对话。待重写队列未清：%v，请立即调 writer 处理。", progress.PendingRewrites)
 		}
 		slog.Warn("stop_guard 拦截 end_turn",
-			"module", "host.reminder", "turn", info.TurnIndex, "consecutive", n)
+			"module", "agent.guard", "turn", info.TurnIndex, "consecutive", n)
 		if onBlock != nil {
 			onBlock("coordinator", "blocked", n)
 		}

@@ -1,4 +1,4 @@
-package reminder
+package guard
 
 import (
 	"context"
@@ -63,7 +63,7 @@ func newCheckpointDeltaGuard(st *store.Store, agentName string, requiredSteps []
 		// 不可恢复错误：直接升级，不浪费一次催促。
 		if _, hard := hardStopReasons[info.Message.StopReason]; hard {
 			slog.Error("subagent stop_guard 检测到不可恢复停机，立即升级",
-				"module", "host.reminder", "agent", agentName,
+				"module", "agent.guard", "agent", agentName,
 				"turn", info.TurnIndex, "stop_reason", info.Message.StopReason)
 			if onBlock != nil {
 				onBlock(agentName, "hard_stop", consecutive.Load())
@@ -100,14 +100,14 @@ func newCheckpointDeltaGuard(st *store.Store, agentName string, requiredSteps []
 		n := consecutive.Add(1)
 		if n > subagentMaxConsecutiveBlocks {
 			slog.Error("subagent stop_guard 连续阻拦超限，升级为终止",
-				"module", "host.reminder", "agent", agentName, "turn", info.TurnIndex, "consecutive", n)
+				"module", "agent.guard", "agent", agentName, "turn", info.TurnIndex, "consecutive", n)
 			if onBlock != nil {
 				onBlock(agentName, "escalated", n)
 			}
 			return agentcore.StopDecision{Allow: false, Escalate: true}
 		}
 		slog.Warn("subagent stop_guard 拦截 end_turn",
-			"module", "host.reminder", "agent", agentName, "turn", info.TurnIndex, "consecutive", n)
+			"module", "agent.guard", "agent", agentName, "turn", info.TurnIndex, "consecutive", n)
 		if onBlock != nil {
 			onBlock(agentName, "blocked", n)
 		}
@@ -161,8 +161,9 @@ func NewArchitectStopGuard(st *store.Store, onBlock BlockHook) agentcore.StopGua
 // 任务感知：被派去生成摘要时，仅 save_review（复核）不算完成——必须产出对应摘要。
 // 否则"被派生成弧摘要却先复核"的 editor 会满足旧的宽松判据提前结束，弧摘要永不落盘
 // （配合 dispatcher 去重哑火曾导致卷中骨架弧死循环，详见 outline-exhaustion-livelock）。
-// StopAfterTool 退出会绕过 StopGuard（loop.go），故 build.go 同步把 save_review 移出硬停，
-// 让复核后能继续走到摘要工具，再由本 guard 把关收尾。
+// 终态工具退出同样会咨询 StopGuard（契约测试 TestContract_TerminalToolExitConsultsStopGuard），
+// 所以 save_review 在 build.go 里硬停是安全的：摘要任务里 editor 先复核时本 guard 会
+// 否决该次退出并催促，直到对应摘要落盘。
 func NewEditorStopGuard(st *store.Store, task string, onBlock BlockHook) agentcore.StopGuard {
 	switch {
 	case strings.Contains(task, "save_volume_summary") || strings.Contains(task, "卷摘要"):

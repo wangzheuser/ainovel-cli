@@ -1,4 +1,4 @@
-package reminder
+package guard
 
 import (
 	"context"

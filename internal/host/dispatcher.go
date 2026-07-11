@@ -1,4 +1,4 @@
-package flow
+package host
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/voocel/agentcore"
+	"github.com/voocel/ainovel-cli/internal/flow"
 	storepkg "github.com/voocel/ainovel-cli/internal/store"
 )
 
@@ -25,7 +26,7 @@ type Dispatcher struct {
 	// 裁定权仍在 LLM：重发消息只附事实与核对许可，不设阈值、不熔断（架构 §10.13）。
 	// 消息因带次数而互不相同，不会把字面相同的指令重复压进 steeringQ。
 	lastMu   sync.Mutex
-	lastSent *Instruction
+	lastSent *flow.Instruction
 	repeats  int
 
 	// onRepeat 是纯 telemetry 回调（无人值守告警用），在同一指令第 repeatNotifyAt
@@ -52,8 +53,8 @@ func (d *Dispatcher) Dispatch() {
 	if !d.enabled.Load() {
 		return
 	}
-	state := LoadState(d.store)
-	inst := Route(state)
+	state := flow.LoadState(d.store)
+	inst := flow.Route(state)
 	if inst == nil {
 		return
 	}
@@ -62,23 +63,23 @@ func (d *Dispatcher) Dispatch() {
 	// 不用等 plan_chapter 真正执行（plan_chapter 会再调一次 StartChapter，幂等）。
 	if inst.Agent == "writer" && inst.Chapter > 0 && d.store != nil {
 		if err := d.store.Progress.ValidateChapterWork(inst.Chapter); err != nil {
-			slog.Error("flow router refuses invalid writer dispatch", "module", "host.flow", "chapter", inst.Chapter, "err", err)
+			slog.Error("flow router refuses invalid writer dispatch", "module", "host.dispatch", "chapter", inst.Chapter, "err", err)
 			return
 		}
 		if err := d.store.Progress.StartChapter(inst.Chapter); err != nil {
-			slog.Warn("flow router pre-mark in-progress failed", "module", "host.flow", "chapter", inst.Chapter, "err", err)
+			slog.Warn("flow router pre-mark in-progress failed", "module", "host.dispatch", "chapter", inst.Chapter, "err", err)
 		}
 	}
 	msg := formatDispatchMessage(inst, n)
-	slog.Debug("flow router dispatch", "module", "host.flow", "agent", inst.Agent, "reason", inst.Reason, "repeat", n)
+	slog.Debug("flow router dispatch", "module", "host.dispatch", "agent", inst.Agent, "reason", inst.Reason, "repeat", n)
 	d.coordinator.Steer(agentcore.UserMsg(msg))
 }
 
 // formatDispatchMessage 组装下达给 Coordinator 的指令消息。
 // n>1 时附加重复事实——告知"上次派发后路由事实未变化"并放开核对许可，
 // 让 LLM 自己裁定照常执行还是改派；不在 Host 层做任何强制分支。
-func formatDispatchMessage(inst *Instruction, n int) string {
-	msg := FormatMessage(inst)
+func formatDispatchMessage(inst *flow.Instruction, n int) string {
+	msg := flow.FormatMessage(inst)
 	if n > 1 {
 		msg += fmt.Sprintf("\n（注意：本指令为第 %d 次下达——上次派发后路由事实未变化。本次允许先调 novel_context 核对事实，再裁定照常执行或改派其它子代理。）", n)
 	}
@@ -93,7 +94,7 @@ func (d *Dispatcher) SetOnRepeat(cb func(agent, task string, n int)) {
 // trackRepeat 记录连续相同指令的下达次数并返回当前次数（1 = 新指令）。
 // 用 Agent+Task 相等性（不比 Reason，因为 Reason 是给人看的辅助文本）。
 // 次数恰好到 repeatNotifyAt 时在锁外触发一次 onRepeat（键变更重计数后重新武装）。
-func (d *Dispatcher) trackRepeat(next *Instruction) int {
+func (d *Dispatcher) trackRepeat(next *flow.Instruction) int {
 	d.lastMu.Lock()
 	if d.lastSent != nil && d.lastSent.Agent == next.Agent && d.lastSent.Task == next.Task {
 		d.repeats++

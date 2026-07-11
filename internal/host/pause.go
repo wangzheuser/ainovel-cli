@@ -3,7 +3,7 @@ package host
 import (
 	"log/slog"
 
-	"github.com/voocel/ainovel-cli/internal/host/flow"
+	"github.com/voocel/ainovel-cli/internal/flow"
 	"github.com/voocel/ainovel-cli/internal/store"
 )
 
@@ -11,7 +11,7 @@ import (
 //
 // 合宪定位与 BudgetSentinel 相同（architecture.md §8.4/§10.15）：不评估模型行为——
 // 停靠点是 Coordinator 依据用户干预意图预先签署的暂停指令，Host 只在条件满足的
-// 边界代为执行。它影响控制流，因此是与 flow.Dispatcher 平级的 Host 政策组件；
+// 边界代为执行。它影响控制流，因此是与 Dispatcher 平级的 Host 政策组件；
 // Route/工具层不感知。停靠点一次性：命中即消费，Continue 恢复后不再触发。
 type PausePointSentinel struct {
 	store  *store.Store
